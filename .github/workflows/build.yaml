@@ -1,35 +1,63 @@
-name: ci
-on:
-  create:
 jobs:
   docker:
+    # 触发条件保持不变：仅在推送以 'v' 开头的 tag 时运行
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4 # [升级] v2 -> v4，性能更好，适配新环境
+
+      # [新增] 关键步骤 1：安装 QEMU
+      # 没有这个，构建 ARM64 镜像时会报 "exec format error" 错误
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # [新增] 关键步骤 2：安装 Docker Buildx
+      # 没有这个，无法使用 platforms 参数，无法并行构建多架构
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       -
         name: Docker meta
         id: meta
-        uses: docker/metadata-action@v3
+        uses: docker/metadata-action@v5 # [升级] v3 -> v5
         with:
-          images: lowid/chartmuseum-ui
+          images: zha0jf/chartmuseum-ui
+          # 这里配置保持不变，会自动生成 v1.0.0 和 v1.0 等标签
           tags: |
+            # 规则A: 如果是 Git Tag (v1.0.0)，生成 :1.0.0 和 :1.0
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            
+            # 规则B: 如果是推送到 main 分支，强制生成 :latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # 或者用分支名生成标签 (例如 :main)
+            # type=ref,event=branch
+
       -
         name: Login to DockerHub
+        # 仅在不是 PR 时登录，保证安全
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v1
+        uses: docker/login-action@v3 # [升级] v1 -> v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       -
         name: Build and push
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v6 # [升级] v2 -> v6
         with:
           context: .
+          # [新增] 关键参数：指定构建 X86 和 ARM64
+          platforms: linux/amd64,linux/arm64
+          # 逻辑检查：多架构构建必须设置为 push: true 才能合并 Manifest。
+          # 这里保留了你的逻辑：如果不是 PR 就推送。
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # [可选推荐] 避免生成复杂的构建证明文件(attestations)，保持 DockerHub 标签页清爽
+          # 如果你不介意 DockerHub 上出现 "unknown" 类型的构建元数据，可以去掉这行
+          provenance: false
